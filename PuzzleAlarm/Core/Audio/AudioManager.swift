@@ -5,9 +5,12 @@ import Foundation
 class AudioManager {
     private var alarmPlayer: AVAudioPlayer?
     private var silentPlayer: AVAudioPlayer?
+    private var toneEngine: AVAudioEngine?
+    private var tonePlayer: AVAudioPlayerNode?
+    private var isPlayingTone = false
 
     var isPlaying: Bool {
-        alarmPlayer?.isPlaying ?? false
+        alarmPlayer?.isPlaying ?? isPlayingTone
     }
 
     func configureAudioSession() {
@@ -50,24 +53,84 @@ class AudioManager {
             url = Bundle.main.url(forResource: "alarm", withExtension: "caf")
         }
 
-        guard let soundUrl = url else {
-            print("No alarm sound found")
-            return
+        if let soundUrl = url {
+            do {
+                alarmPlayer = try AVAudioPlayer(contentsOf: soundUrl)
+                alarmPlayer?.numberOfLoops = -1 // Loop until stopped
+                alarmPlayer?.volume = 1.0
+                alarmPlayer?.play()
+                return
+            } catch {
+                print("Failed to play alarm file: \(error)")
+            }
         }
 
+        // No sound file found - generate alarm tone
+        playGeneratedTone()
+    }
+
+    private func playGeneratedTone() {
+        toneEngine = AVAudioEngine()
+        tonePlayer = AVAudioPlayerNode()
+
+        guard let engine = toneEngine, let player = tonePlayer else { return }
+
+        let sampleRate: Double = 44100
+        let frequency: Double = 880 // A5 note - urgent sounding
+        let amplitude: Float = 0.8
+
+        // Create audio format
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else { return }
+
+        // Generate a beeping pattern (beep on/off)
+        let beepDuration: Double = 0.3
+        let silenceDuration: Double = 0.2
+        let patternDuration = beepDuration + silenceDuration
+        let totalDuration: Double = 2.0 // 2 second pattern that loops
+        let frameCount = AVAudioFrameCount(sampleRate * totalDuration)
+
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
+        buffer.frameLength = frameCount
+
+        guard let floatData = buffer.floatChannelData?[0] else { return }
+
+        for frame in 0..<Int(frameCount) {
+            let time = Double(frame) / sampleRate
+            let patternTime = time.truncatingRemainder(dividingBy: patternDuration)
+
+            if patternTime < beepDuration {
+                // Beep - sine wave
+                let phase = 2.0 * Double.pi * frequency * time
+                floatData[frame] = amplitude * Float(sin(phase))
+            } else {
+                // Silence
+                floatData[frame] = 0
+            }
+        }
+
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+
         do {
-            alarmPlayer = try AVAudioPlayer(contentsOf: soundUrl)
-            alarmPlayer?.numberOfLoops = -1 // Loop until stopped
-            alarmPlayer?.volume = 1.0
-            alarmPlayer?.play()
+            try engine.start()
+            // Schedule buffer to loop
+            player.scheduleBuffer(buffer, at: nil, options: .loops)
+            player.play()
+            isPlayingTone = true
         } catch {
-            print("Failed to play alarm: \(error)")
+            print("Failed to start tone engine: \(error)")
         }
     }
 
     func stopAlarm() {
         alarmPlayer?.stop()
         alarmPlayer = nil
+
+        tonePlayer?.stop()
+        toneEngine?.stop()
+        tonePlayer = nil
+        toneEngine = nil
+        isPlayingTone = false
     }
 
     func setVolume(_ volume: Float) {
